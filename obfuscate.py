@@ -8,7 +8,7 @@ from pathlib import Path
 import random
 import re
 
-from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 
 class OrangeObfuscator:
@@ -120,12 +120,23 @@ class OrangeObfuscator:
         return result
 
     def orange_mask(self, image: Image.Image) -> Image.Image:
-        hsv = image.convert("HSV")
-        saturation = hsv.getchannel("S").point(lambda value: 255 if value >= 80 else 0)
-        brightness = hsv.getchannel("V").point(lambda value: 255 if value >= 35 else 0)
-        mask = ImageChops.multiply(saturation, brightness)
-        mask = mask.filter(ImageFilter.MedianFilter(3)).filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.MinFilter(5))
-        mask = mask.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.7))
+        background_like = image.convert("HSV").getchannel("S").point(
+            lambda value: 255 if value <= 55 else 0
+        )
+        unconnected = background_like.copy()
+        border = (
+            [(x, 0) for x in range(image.width)]
+            + [(x, image.height - 1) for x in range(image.width)]
+            + [(0, y) for y in range(image.height)]
+            + [(image.width - 1, y) for y in range(image.height)]
+        )
+        for point in border:
+            if unconnected.getpixel(point):
+                ImageDraw.floodfill(unconnected, point, 0)
+        exterior = ImageChops.subtract(background_like, unconnected)
+        mask = ImageOps.invert(exterior)
+        mask = mask.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.MinFilter(7))
+        mask = mask.filter(ImageFilter.MedianFilter(3)).filter(ImageFilter.GaussianBlur(0.7))
         if not mask.getbbox():
             raise ValueError("无法识别橙子轮廓")
         return mask
@@ -137,12 +148,12 @@ class OrangeObfuscator:
         crop = image.convert("RGBA")
         crop.putalpha(mask)
         crop = crop.crop(mask.getbbox())
-        crop = crop.rotate(rng.uniform(-18, 18), Image.Resampling.BICUBIC, expand=True)
-        side = round(self.SIZE * rng.uniform(0.58, 0.83))
+        crop = crop.rotate(rng.uniform(-22, 22), Image.Resampling.BICUBIC, expand=True)
+        side = round(self.SIZE * rng.uniform(0.54, 0.86))
         crop = ImageOps.contain(crop, (side, side), Image.Resampling.LANCZOS)
         canvas = Image.new("RGB", (self.SIZE, self.SIZE), "white")
-        x = max(0, min(self.SIZE - crop.width, (self.SIZE - crop.width) // 2 + rng.randint(-30, 30)))
-        y = max(0, min(self.SIZE - crop.height, (self.SIZE - crop.height) // 2 + rng.randint(-30, 30)))
+        x = max(0, min(self.SIZE - crop.width, (self.SIZE - crop.width) // 2 + rng.randint(-36, 36)))
+        y = max(0, min(self.SIZE - crop.height, (self.SIZE - crop.height) // 2 + rng.randint(-36, 36)))
         canvas.paste(crop, (x, y), crop)
         return canvas
 
@@ -154,8 +165,8 @@ class OrangeObfuscator:
         subject = image.convert("RGBA")
         subject.putalpha(mask)
         subject = subject.crop(mask.getbbox())
-        subject = subject.rotate(rng.uniform(-22, 22), Image.Resampling.BICUBIC, expand=True)
-        side = round(self.SIZE * rng.uniform(0.48, 0.76))
+        subject = subject.rotate(rng.uniform(-28, 28), Image.Resampling.BICUBIC, expand=True)
+        side = round(self.SIZE * rng.uniform(0.42, 0.80))
         subject.thumbnail((side, side), Image.Resampling.LANCZOS)
 
         with Image.open(background) as raw:
@@ -166,8 +177,8 @@ class OrangeObfuscator:
         margin = (padded_size - self.SIZE) // 2
         scene = scene.crop((margin, margin, margin + self.SIZE, margin + self.SIZE))
         scene = ImageEnhance.Brightness(scene).enhance(rng.uniform(0.9, 1.1))
-        x = max(0, min(self.SIZE - subject.width, (self.SIZE - subject.width) // 2 + rng.randint(-34, 34)))
-        y = max(0, min(self.SIZE - subject.height, (self.SIZE - subject.height) // 2 + rng.randint(-34, 34)))
+        x = max(0, min(self.SIZE - subject.width, (self.SIZE - subject.width) // 2 + rng.randint(-45, 45)))
+        y = max(0, min(self.SIZE - subject.height, (self.SIZE - subject.height) // 2 + rng.randint(-45, 45)))
         scene.paste(subject, (x, y), subject)
         return scene
 
