@@ -1,0 +1,5 @@
+# 每行一个相对于项目根目录的源图路径；仅排除已确认的破损合成图。
+# 混淆_excellent3/0087.jpg
+待混淆数据/excellent3/rotated_by_30_Screen Shot 2018-06-13 at 12.00.43 AM.png
+# 混淆_excellent5/0005.jpg
+待混淆数据/excellent5/rotated_by_45_Screen Shot 2018-06-13 at 12.00.43 AM.png

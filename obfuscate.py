@@ -191,34 +191,66 @@ class OrangeObfuscator:
         target.mkdir(parents=True, exist_ok=True)
         return target
 
-    def write_group(self, kind: str, group: str, files: list[Path], backgrounds: list[Path] | None = None) -> None:
+    def write_group(
+        self,
+        kind: str,
+        group: str,
+        files: list[Path],
+        backgrounds: list[Path] | None = None,
+        excluded: set[str] | None = None,
+    ) -> None:
         target = self.output_directory(kind, group)
-        expected = {f"{index:04d}.jpg" for index in range(1, len(files) + 1)}
-        for index, source in enumerate(files, 1):
+        jobs = [
+            (index, source)
+            for index, source in enumerate(files, 1)
+            if source.relative_to(self.root).as_posix() not in (excluded or set())
+        ]
+        expected = {f"{index:04d}.jpg" for index, _ in jobs}
+        for index, source in jobs:
             rng = self.random_for(source)
             image = self.transform(source, rng) if backgrounds is None else self.composite(source, backgrounds[index - 1], rng)
             image.save(target / f"{index:04d}.jpg", quality=92, subsampling=0)
         for old in target.iterdir():
             if old.name not in expected:
                 old.unlink()
-        print(f"[{kind}] {group}：{len(files)} 张 → {target}")
+        print(f"[{kind}] {group}：{len(jobs)} 张 → {target}")
 
     def run(self) -> None:
         transform_groups = self.select_transforms(self.groups("待变换数据"))
         composite_groups = self.groups("待混淆数据")
         backgrounds = self.normalize_backgrounds()
         all_composites = [(group, path) for group, files in composite_groups.items() for path in files]
+        exclusion_file = self.root / "obfuscate_exclusions.txt"
+        excluded = {
+            line.strip().replace("\\", "/")
+            for line in exclusion_file.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        } if exclusion_file.exists() else set()
+        available = {
+            path.relative_to(self.root).as_posix()
+            for groups in (transform_groups, composite_groups)
+            for files in groups.values()
+            for path in files
+        }
+        if unknown := excluded - available:
+            raise ValueError(f"排除清单中找不到源图：{sorted(unknown)}")
         assignments = self.assign_backgrounds(backgrounds, len(all_composites))
         counts = Counter(path.parent.name for path in assignments)
         print(f"[背景分配] {dict(sorted(counts.items()))}")
 
         for group, files in transform_groups.items():
-            self.write_group("变换", group, files)
+            self.write_group("变换", group, files, excluded=excluded)
         offset = 0
         for group, files in composite_groups.items():
-            self.write_group("混淆", group, files, assignments[offset:offset + len(files)])
+            self.write_group("混淆", group, files, assignments[offset:offset + len(files)], excluded)
             offset += len(files)
-        print(f"完成：变换 {sum(map(len, transform_groups.values()))} 张，混淆 {len(all_composites)} 张；固定随机种子 {self.SEED}。")
+        transform_count = sum(
+            path.relative_to(self.root).as_posix() not in excluded
+            for files in transform_groups.values()
+            for path in files
+        )
+        composite_count = sum(path.relative_to(self.root).as_posix() not in excluded for _, path in all_composites)
+        print(f"完成：变换 {transform_count} 张，混淆 {composite_count} 张；固定随机种子 {self.SEED}。")
 
 
 if __name__ == "__main__":
