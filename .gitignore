@@ -8,3 +8,6 @@
 !/爬虫/main.py
 数据源
 总资源
+__pycache__/
+*.py[cod]
+*$py.class

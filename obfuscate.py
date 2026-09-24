@@ -200,10 +200,11 @@ class OrangeObfuscator:
         excluded: set[str] | None = None,
     ) -> None:
         target = self.output_directory(kind, group)
+        excluded = excluded or set()
         jobs = [
             (index, source)
             for index, source in enumerate(files, 1)
-            if source.relative_to(self.root).as_posix() not in (excluded or set())
+            if source.relative_to(self.root).as_posix() not in excluded
         ]
         expected = {f"{index:04d}.jpg" for index, _ in jobs}
         for index, source in jobs:
@@ -249,7 +250,10 @@ class OrangeObfuscator:
             for files in transform_groups.values()
             for path in files
         )
-        composite_count = sum(path.relative_to(self.root).as_posix() not in excluded for _, path in all_composites)
+        composite_count = sum(
+            path.relative_to(self.root).as_posix() not in excluded
+            for _, path in all_composites
+        )
         print(f"完成：变换 {transform_count} 张，混淆 {composite_count} 张；固定随机种子 {self.SEED}。")
 
 
