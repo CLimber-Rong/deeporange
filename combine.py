@@ -5,9 +5,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import cos, pi
+import os
 from pathlib import Path
 import shutil
 import sys
+import tempfile
 
 try:
     from PIL import Image, ImageOps
@@ -47,6 +49,10 @@ class DatasetCombiner:
         self.root = root
 
     def run(self) -> int:
+        if Image is None or ImageOps is None:
+            print("[错误] 数据整理和查重需要 Pillow，请先执行：python -m pip install Pillow")
+            return 1
+
         total = 0
         missing = False
 
@@ -70,6 +76,10 @@ class DatasetCombiner:
     def combine_category(self, source_root: Path, output_root: Path) -> tuple[int, bool]:
         if not source_root.is_dir():
             print(f"[跳过] 未找到数据源目录：{source_root}")
+            return 0, False
+
+        if output_root.is_symlink():
+            print(f"[错误] 输出目录不能是符号链接：{output_root}")
             return 0, False
 
         output_root.mkdir(parents=True, exist_ok=True)
@@ -99,7 +109,9 @@ class DatasetCombiner:
                     else f"{prefix}{source_file.name}"
                 )
                 target_name = self.unique_name(target_name, used_names)
-                shutil.copy2(source_file, output_root / target_name)
+                target_file = output_root / target_name
+                if not self.copy_image(source_file, target_file):
+                    continue
                 used_names.add(target_name.casefold())
                 copied += 1
                 group_copied += 1
@@ -108,7 +120,89 @@ class DatasetCombiner:
 
         if not groups:
             print(f"[{source_root.name}] 未找到来源子目录。")
+        normalized = self.normalize_output(output_root)
+        print(f"[整理] {output_root.name}：输出图片已统一为正方形，修正 {normalized} 张已有图片。")
         return copied, True
+
+    def copy_image(self, source_file: Path, target_file: Path) -> bool:
+        if target_file.is_symlink():
+            print(f"[跳过] 目标文件是符号链接：{target_file}")
+            return False
+
+        try:
+            with Image.open(source_file) as opened:
+                if opened.width == opened.height:
+                    shutil.copy2(source_file, target_file)
+                    return True
+
+                cropped = self.center_crop(ImageOps.exif_transpose(opened))
+                self.save_image(cropped, target_file, opened.format)
+                return True
+        except Exception as error:
+            print(f"[跳过] 无法整理图片：{source_file}（{error}）")
+            return False
+
+    def normalize_output(self, output_root: Path) -> int:
+        corrected = 0
+        images = sorted(
+            (
+                path
+                for path in output_root.iterdir()
+                if path.is_file() and path.suffix.casefold() in IMAGE_SUFFIXES
+            ),
+            key=lambda path: path.name.casefold(),
+        )
+        for path in images:
+            if path.is_symlink():
+                print(f"[跳过] 输出图片是符号链接：{path}")
+                continue
+            corrected += int(self.crop_file(path))
+        return corrected
+
+    def crop_file(self, path: Path) -> bool:
+        try:
+            with Image.open(path) as opened:
+                if opened.width == opened.height:
+                    return False
+
+                cropped = self.center_crop(ImageOps.exif_transpose(opened))
+                self.save_image(cropped, path, opened.format)
+                return True
+        except Exception as error:
+            print(f"[跳过] 无法中心裁剪图片：{path}（{error}）")
+            return False
+
+    @staticmethod
+    def center_crop(image):
+        width, height = image.size
+        side = min(width, height)
+        left = (width - side) // 2
+        top = (height - side) // 2
+        return image.crop((left, top, left + side, top + side))
+
+    @staticmethod
+    def save_image(image, target: Path, image_format: str | None) -> None:
+        image_format = (
+            image_format
+            or Image.registered_extensions().get(target.suffix.casefold(), "PNG")
+        ).upper()
+        if image_format == "JPG":
+            image_format = "JPEG"
+        if image_format == "JPEG" and image.mode not in {"L", "RGB"}:
+            image = image.convert("RGB")
+
+        options = {"quality": 95} if image_format in {"JPEG", "WEBP"} else {}
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=target.parent, suffix=target.suffix, delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+            image.save(temporary_path, format=image_format, **options)
+            os.replace(temporary_path, target)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
 
     @staticmethod
     def unique_name(name: str, used_names: set[str]) -> str:
