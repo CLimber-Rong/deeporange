@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from math import cos, pi
 import os
 from pathlib import Path
@@ -30,6 +32,9 @@ PHASH_COSINES = tuple(
     )
     for frequency in range(PHASH_DCT_SIZE)
 )
+MANIFEST_FILENAME = "manifest.json"
+MANIFEST_INDEX_FILENAME = ".combine_manifest_index.json"
+MANIFEST_RANDOM_SEED = 20260924
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,12 @@ class ImageRecord:
     path: Path
     perceptual_hash: int
     pixels: bytes
+
+
+@dataclass(frozen=True)
+class ManifestSource:
+    path: Path
+    count: int
 
 
 class DatasetCombiner:
@@ -51,6 +62,14 @@ class DatasetCombiner:
     def run(self) -> int:
         if Image is None or ImageOps is None:
             print("[错误] 数据整理和查重需要 Pillow，请先执行：python -m pip install Pillow")
+            return 1
+
+        try:
+            manifest_path = self.root / "数据源" / "非橙子数据源" / MANIFEST_FILENAME
+            self.load_manifest(manifest_path)
+            self.load_manifest_index()
+        except ValueError as error:
+            print(f"[错误] manifest 配置无效：{error}")
             return 1
 
         total = 0
@@ -78,11 +97,26 @@ class DatasetCombiner:
             print(f"[跳过] 未找到数据源目录：{source_root}")
             return 0, False
 
+        try:
+            manifest_sources = self.load_manifest(source_root / MANIFEST_FILENAME)
+            previous_outputs = (
+                self.load_manifest_index()
+                if source_root.name == "非橙子数据源"
+                else ()
+            )
+        except ValueError as error:
+            print(f"[错误] manifest 配置无效：{error}")
+            return 0, False
+
         if output_root.is_symlink():
             print(f"[错误] 输出目录不能是符号链接：{output_root}")
             return 0, False
 
         output_root.mkdir(parents=True, exist_ok=True)
+        for name in previous_outputs:
+            old_file = output_root / name
+            if old_file.is_file() and not old_file.is_symlink():
+                old_file.unlink()
         used_names: set[str] = set()
         copied = 0
         groups = sorted(
@@ -91,38 +125,170 @@ class DatasetCombiner:
         )
 
         for group in groups:
-            group_copied = 0
-            prefix = f"{group.name}_"
-            images = sorted(
-                (
-                    path
-                    for path in group.iterdir()
-                    if path.is_file() and path.suffix.casefold() in IMAGE_SUFFIXES
-                ),
-                key=lambda path: path.name.casefold(),
+            group_copied, _ = self.copy_group(
+                group, self.image_files(group), output_root, used_names
             )
-
-            for source_file in images:
-                target_name = (
-                    source_file.name
-                    if source_file.name.casefold().startswith(prefix.casefold())
-                    else f"{prefix}{source_file.name}"
-                )
-                target_name = self.unique_name(target_name, used_names)
-                target_file = output_root / target_name
-                if not self.copy_image(source_file, target_file):
-                    continue
-                used_names.add(target_name.casefold())
-                copied += 1
-                group_copied += 1
+            copied += group_copied
 
             print(f"[{source_root.name}] {group.name}: 复制 {group_copied} 张")
 
         if not groups:
             print(f"[{source_root.name}] 未找到来源子目录。")
+
+        manifest_outputs: list[str] = []
+        for source in manifest_sources:
+            images = self.image_files(source.path)
+            relative_path = source.path.relative_to(self.root.resolve()).as_posix()
+            selected = sorted(
+                sorted(
+                    images,
+                    key=lambda image: sha256(
+                        f"{MANIFEST_RANDOM_SEED}:{relative_path}/{image.name}".encode(
+                            "utf-8"
+                        )
+                    ).digest(),
+                )[: source.count],
+                key=self.path_sort_key,
+            )
+            group_copied, names = self.copy_group(
+                source.path, selected, output_root, used_names
+            )
+            copied += group_copied
+            manifest_outputs.extend(names)
+            print(
+                f"[manifest] {relative_path}: 选取 {source.count} 张，复制 {group_copied} 张"
+            )
+
         normalized = self.normalize_output(output_root)
+        if source_root.name == "非橙子数据源":
+            self.save_manifest_index(manifest_outputs)
         print(f"[整理] {output_root.name}：输出图片已统一为正方形，修正 {normalized} 张已有图片。")
         return copied, True
+
+    def load_manifest(self, manifest_path: Path) -> tuple[ManifestSource, ...]:
+        if manifest_path.is_symlink():
+            raise ValueError(f"manifest 不能是符号链接：{manifest_path}")
+        if not manifest_path.exists():
+            return ()
+        if not manifest_path.is_file():
+            raise ValueError(f"manifest 必须是普通文件：{manifest_path}")
+
+        try:
+            document = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"{manifest_path}: {error}") from error
+        if not isinstance(document, dict) or not isinstance(
+            document.get("sources"), list
+        ):
+            raise ValueError("根节点必须包含 sources 数组")
+
+        project_root = self.root.resolve()
+        seen: set[str] = set()
+        sources: list[ManifestSource] = []
+        for index, entry in enumerate(document["sources"], start=1):
+            if not isinstance(entry, dict):
+                raise ValueError(f"sources[{index}] 必须是对象")
+            raw_path = entry.get("path")
+            count = entry.get("count")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise ValueError(f"sources[{index}].path 必须是非空字符串")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError(f"sources[{index}].count 必须是正整数")
+
+            relative_path = Path(raw_path)
+            if relative_path.is_absolute():
+                raise ValueError(f"sources[{index}].path 必须相对项目根目录")
+            source_path = (project_root / relative_path).resolve()
+            if not source_path.is_relative_to(project_root):
+                raise ValueError(f"sources[{index}].path 超出项目根目录")
+            if not source_path.is_dir():
+                raise ValueError(f"sources[{index}].path 不是目录：{raw_path}")
+
+            path_key = str(source_path).casefold()
+            if path_key in seen:
+                raise ValueError(f"sources[{index}].path 重复：{raw_path}")
+            seen.add(path_key)
+            available = len(self.image_files(source_path))
+            if count > available:
+                raise ValueError(
+                    f"sources[{index}] 需要 {count} 张，目录只有 {available} 张：{raw_path}"
+                )
+            sources.append(ManifestSource(source_path, count))
+        return tuple(sources)
+
+    def load_manifest_index(self) -> tuple[str, ...]:
+        index_path = self.root / MANIFEST_INDEX_FILENAME
+        if index_path.is_symlink():
+            raise ValueError(f"输出索引不能是符号链接：{index_path}")
+        if not index_path.exists():
+            return ()
+        if not index_path.is_file():
+            raise ValueError(f"输出索引必须是普通文件：{index_path}")
+        try:
+            names = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"{index_path}: {error}") from error
+        if not isinstance(names, list) or any(
+            not isinstance(name, str)
+            or Path(name).name != name
+            or Path(name).suffix.casefold() not in IMAGE_SUFFIXES
+            for name in names
+        ):
+            raise ValueError(f"输出索引包含无效文件名：{index_path}")
+        return tuple(names)
+
+    def save_manifest_index(self, names: list[str]) -> None:
+        index_path = self.root / MANIFEST_INDEX_FILENAME
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.root,
+                suffix=".json", delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                json.dump(names, temporary, ensure_ascii=False, indent=2)
+                temporary.write("\n")
+            os.replace(temporary_path, index_path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+
+    def copy_group(
+        self,
+        group: Path,
+        images: list[Path],
+        output_root: Path,
+        used_names: set[str],
+    ) -> tuple[int, list[str]]:
+        names: list[str] = []
+        prefix = f"{group.name}_"
+        for source_file in images:
+            target_name = (
+                source_file.name
+                if source_file.name.casefold().startswith(prefix.casefold())
+                else f"{prefix}{source_file.name}"
+            )
+            target_name = self.unique_name(target_name, used_names)
+            if not self.copy_image(source_file, output_root / target_name):
+                continue
+            used_names.add(target_name.casefold())
+            names.append(target_name)
+        return len(names), names
+
+    @staticmethod
+    def path_sort_key(path: Path) -> tuple[str, str]:
+        return path.name.casefold(), path.name
+
+    @classmethod
+    def image_files(cls, directory: Path) -> list[Path]:
+        return sorted(
+            (
+                path
+                for path in directory.iterdir()
+                if path.is_file() and path.suffix.casefold() in IMAGE_SUFFIXES
+            ),
+            key=cls.path_sort_key,
+        )
 
     def copy_image(self, source_file: Path, target_file: Path) -> bool:
         if target_file.is_symlink():
@@ -132,6 +298,7 @@ class DatasetCombiner:
         try:
             with Image.open(source_file) as opened:
                 if opened.width == opened.height:
+                    opened.verify()
                     shutil.copy2(source_file, target_file)
                     return True
 

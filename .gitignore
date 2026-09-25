@@ -6,9 +6,13 @@
 非橙子
 /爬虫/*
 !/爬虫/main.py
-数据源
+/数据源/*
+!/数据源/非橙子数据源/
+/数据源/非橙子数据源/*
+!/数据源/非橙子数据源/manifest.json
 总资源
 __pycache__/
 .obfuscate_cache/
+.combine_manifest_index.json
 *.py[cod]
 *$py.class
