@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
 from hashlib import blake2b
+import os
 from pathlib import Path
 import random
 import re
 
-from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+import numpy as np
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL.PngImagePlugin import PngInfo
 
 
 class OrangeObfuscator:
@@ -18,10 +23,12 @@ class OrangeObfuscator:
     TRANSFORM_COUNT = 140
     MAX_BACKGROUND_USES = 12
     PURE_BACKGROUND_SHARE = 0.15
+    MASK_VERSION = "border-connected-saturation-v1"
 
     def __init__(self, root: Path) -> None:
         self.root = root
         self.output_root = root / "数据源" / "橙子数据源"
+        self.cache_root = root / ".obfuscate_cache"
 
     def images(self, directory: Path) -> list[Path]:
         return sorted(
@@ -120,31 +127,54 @@ class OrangeObfuscator:
         return result
 
     def orange_mask(self, image: Image.Image) -> Image.Image:
-        background_like = image.convert("HSV").getchannel("S").point(
-            lambda value: 255 if value <= 55 else 0
-        )
-        unconnected = background_like.copy()
-        border = (
-            [(x, 0) for x in range(image.width)]
-            + [(x, image.height - 1) for x in range(image.width)]
-            + [(0, y) for y in range(image.height)]
-            + [(image.width - 1, y) for y in range(image.height)]
-        )
-        for point in border:
-            if unconnected.getpixel(point):
-                ImageDraw.floodfill(unconnected, point, 0)
-        exterior = ImageChops.subtract(background_like, unconnected)
-        mask = ImageOps.invert(exterior)
+        candidate = np.asarray(image.convert("HSV").getchannel("S")) <= 55
+        exterior = np.zeros_like(candidate)
+        exterior[0, :] = candidate[0, :]
+        exterior[-1, :] = candidate[-1, :]
+        exterior[:, 0] = candidate[:, 0]
+        exterior[:, -1] = candidate[:, -1]
+        while True:
+            grown = exterior.copy()
+            grown[1:, :] |= exterior[:-1, :] & candidate[1:, :]
+            grown[:-1, :] |= exterior[1:, :] & candidate[:-1, :]
+            grown[:, 1:] |= exterior[:, :-1] & candidate[:, 1:]
+            grown[:, :-1] |= exterior[:, 1:] & candidate[:, :-1]
+            if np.array_equal(grown, exterior):
+                break
+            exterior = grown
+        mask = Image.fromarray((~exterior).astype(np.uint8) * 255, "L")
         mask = mask.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.MinFilter(7))
         mask = mask.filter(ImageFilter.MedianFilter(3)).filter(ImageFilter.GaussianBlur(0.7))
         if not mask.getbbox():
             raise ValueError("无法识别橙子轮廓")
         return mask
 
+    def cached_mask(self, source: Path, image: Image.Image, kind: str) -> Image.Image:
+        identity = f"{kind}/{source.relative_to(self.root).as_posix()}".encode("utf-8")
+        cache = self.cache_root / f"{blake2b(identity, digest_size=16).hexdigest()}.png"
+        stat = source.stat()
+        signature = f"{self.MASK_VERSION}/{stat.st_size}/{stat.st_mtime_ns}"
+        if cache.exists():
+            try:
+                with Image.open(cache) as saved:
+                    if saved.info.get("source_signature") == signature and saved.mode == "L" and saved.size == image.size:
+                        return saved.copy()
+            except (OSError, ValueError):
+                pass
+
+        mask = self.orange_mask(image)
+        self.cache_root.mkdir(exist_ok=True)
+        metadata = PngInfo()
+        metadata.add_text("source_signature", signature)
+        temporary = cache.with_suffix(".tmp")
+        mask.save(temporary, format="PNG", pnginfo=metadata)
+        temporary.replace(cache)
+        return mask
+
     def transform(self, source: Path, rng: random.Random) -> Image.Image:
         with Image.open(source) as raw:
             image = ImageOps.exif_transpose(raw).convert("RGB").filter(ImageFilter.MedianFilter(3))
-        mask = self.orange_mask(image)
+        mask = self.cached_mask(source, image, "transform")
         crop = image.convert("RGBA")
         crop.putalpha(mask)
         crop = crop.crop(mask.getbbox())
@@ -160,7 +190,7 @@ class OrangeObfuscator:
     def composite(self, source: Path, background: Path, rng: random.Random) -> Image.Image:
         with Image.open(source) as raw:
             image = ImageOps.exif_transpose(raw).convert("RGB")
-        mask = self.orange_mask(image)
+        mask = self.cached_mask(source, image, "composite")
         image = ImageEnhance.Brightness(image).enhance(rng.uniform(0.93, 1.07))
         subject = image.convert("RGBA")
         subject.putalpha(mask)
@@ -191,6 +221,12 @@ class OrangeObfuscator:
         target.mkdir(parents=True, exist_ok=True)
         return target
 
+    def process_one(self, job: tuple[Path, Path, Path | None]) -> None:
+        source, destination, background = job
+        rng = self.random_for(source)
+        image = self.transform(source, rng) if background is None else self.composite(source, background, rng)
+        image.save(destination, quality=92, subsampling=0)
+
     def write_group(
         self,
         kind: str,
@@ -198,6 +234,7 @@ class OrangeObfuscator:
         files: list[Path],
         backgrounds: list[Path] | None = None,
         excluded: set[str] | None = None,
+        pool: ProcessPoolExecutor | None = None,
     ) -> None:
         target = self.output_directory(kind, group)
         excluded = excluded or set()
@@ -207,10 +244,15 @@ class OrangeObfuscator:
             if source.relative_to(self.root).as_posix() not in excluded
         ]
         expected = {f"{index:04d}.jpg" for index, _ in jobs}
-        for index, source in jobs:
-            rng = self.random_for(source)
-            image = self.transform(source, rng) if backgrounds is None else self.composite(source, backgrounds[index - 1], rng)
-            image.save(target / f"{index:04d}.jpg", quality=92, subsampling=0)
+        work = [
+            (source, target / f"{index:04d}.jpg", None if backgrounds is None else backgrounds[index - 1])
+            for index, source in jobs
+        ]
+        if pool is None:
+            for job in work:
+                self.process_one(job)
+        else:
+            list(pool.map(self.process_one, work, chunksize=4))
         for old in target.iterdir():
             if old.name not in expected:
                 old.unlink()
@@ -239,12 +281,14 @@ class OrangeObfuscator:
         counts = Counter(path.parent.name for path in assignments)
         print(f"[背景分配] {dict(sorted(counts.items()))}")
 
-        for group, files in transform_groups.items():
-            self.write_group("变换", group, files, excluded=excluded)
-        offset = 0
-        for group, files in composite_groups.items():
-            self.write_group("混淆", group, files, assignments[offset:offset + len(files)], excluded)
-            offset += len(files)
+        workers = min(4, os.cpu_count() or 1)
+        with ProcessPoolExecutor(max_workers=workers) if workers > 1 else nullcontext() as pool:
+            for group, files in transform_groups.items():
+                self.write_group("变换", group, files, excluded=excluded, pool=pool)
+            offset = 0
+            for group, files in composite_groups.items():
+                self.write_group("混淆", group, files, assignments[offset:offset + len(files)], excluded, pool)
+                offset += len(files)
         transform_count = sum(
             path.relative_to(self.root).as_posix() not in excluded
             for files in transform_groups.values()
