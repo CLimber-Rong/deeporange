@@ -3,25 +3,32 @@ setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
 
-where py >nul 2>&1
+python -c "import sys" >nul 2>&1
 if not errorlevel 1 (
-    py -3 "%~dp0combine.py"
+    set "python_cmd=python"
 ) else (
-    where python >nul 2>&1
+    py -3 -c "import sys" >nul 2>&1
     if errorlevel 1 (
         echo Python was not found. Please install Python 3 and try again.
         pause
         exit /b 1
     )
-    python "%~dp0combine.py"
+    set "python_cmd=py -3"
 )
 
+%python_cmd% "%~dp0obfuscate.py"
+if errorlevel 1 goto :failed
+%python_cmd% "%~dp0combine.py"
+if errorlevel 1 goto :failed
+
+echo.
+echo Dataset generation finished.
+pause
+exit /b 0
+
+:failed
 set "exit_code=%errorlevel%"
 echo.
-if "%exit_code%"=="0" (
-    echo Dataset generation finished.
-) else (
-    echo Dataset generation finished with errors.
-)
+echo Dataset generation finished with errors.
 pause
 exit /b %exit_code%
