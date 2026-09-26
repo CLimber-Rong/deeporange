@@ -14,6 +14,5 @@
 总资源
 __pycache__/
 .obfuscate_cache/
-.combine_manifest_index.json
 *.py[cod]
 *$py.class

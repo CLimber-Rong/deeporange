@@ -33,7 +33,6 @@ PHASH_COSINES = tuple(
     for frequency in range(PHASH_DCT_SIZE)
 )
 MANIFEST_FILENAME = "manifest.json"
-MANIFEST_INDEX_FILENAME = ".combine_manifest_index.json"
 MANIFEST_RANDOM_SEED = 20260924
 
 
@@ -64,78 +63,72 @@ class DatasetCombiner:
             print("[错误] 数据整理和查重需要 Pillow，请先执行：python -m pip install Pillow")
             return 1
 
+        categories = tuple(
+            (self.root / "数据源" / source, self.root / output)
+            for source, output in self.CATEGORIES
+        )
         try:
-            manifest_path = self.root / "数据源" / "非橙子数据源" / MANIFEST_FILENAME
-            self.load_manifest(manifest_path)
-            self.load_manifest_index()
+            manifests = tuple(
+                self.load_manifest(source / MANIFEST_FILENAME)
+                for source, _ in categories
+            )
+            for source, output in categories:
+                if not source.is_dir():
+                    raise ValueError(f"未找到数据源目录：{source}")
+                if output.is_symlink() or (output.exists() and not output.is_dir()):
+                    raise ValueError(f"输出目录无效：{output}")
+                if output.exists():
+                    unexpected = next(
+                        (
+                            path for path in output.iterdir()
+                            if path.is_symlink()
+                            or not path.is_file()
+                            or path.suffix.casefold() not in IMAGE_SUFFIXES
+                        ),
+                        None,
+                    )
+                    if unexpected is not None:
+                        raise ValueError(f"输出目录含非图片文件，未清理：{unexpected}")
         except ValueError as error:
-            print(f"[错误] manifest 配置无效：{error}")
+            print(f"[错误] 无法整理数据集：{error}")
             return 1
 
         total = 0
-        missing = False
-
-        for source_name, output_name in self.CATEGORIES:
-            source_root = self.root / "数据源" / source_name
-            output_root = self.root / output_name
-            copied, source_exists = self.combine_category(source_root, output_root)
-            total += copied
-            missing |= not source_exists
+        for (source, output), manifest in zip(categories, manifests):
+            total += self.combine_category(source, output, manifest)
 
         print(f"\n整理完成，共复制 {total} 张图片。")
-        if missing:
-            return 1
-
         datasets = tuple(
             (output_name, self.root / output_name)
             for _, output_name in self.CATEGORIES
         )
         return 0 if VisualDuplicateCleaner(datasets).run() else 1
 
-    def combine_category(self, source_root: Path, output_root: Path) -> tuple[int, bool]:
-        if not source_root.is_dir():
-            print(f"[跳过] 未找到数据源目录：{source_root}")
-            return 0, False
-
-        try:
-            manifest_sources = self.load_manifest(source_root / MANIFEST_FILENAME)
-            previous_outputs = (
-                self.load_manifest_index()
-                if source_root.name == "非橙子数据源"
-                else ()
-            )
-        except ValueError as error:
-            print(f"[错误] manifest 配置无效：{error}")
-            return 0, False
-
-        if output_root.is_symlink():
-            print(f"[错误] 输出目录不能是符号链接：{output_root}")
-            return 0, False
-
+    def combine_category(
+        self, source_root: Path, output_root: Path,
+        manifest_sources: tuple[ManifestSource, ...],
+    ) -> int:
         output_root.mkdir(parents=True, exist_ok=True)
-        for name in previous_outputs:
-            old_file = output_root / name
-            if old_file.is_file() and not old_file.is_symlink():
-                old_file.unlink()
+        old_images = self.image_files(output_root)
+        for old_file in old_images:
+            old_file.unlink()
+        print(f"[清理] {output_root.name}：移除 {len(old_images)} 张旧图片")
+
         used_names: set[str] = set()
         copied = 0
         groups = sorted(
             (path for path in source_root.iterdir() if path.is_dir()),
             key=lambda path: path.name.casefold(),
         )
-
         for group in groups:
-            group_copied, _ = self.copy_group(
+            group_copied = self.copy_group(
                 group, self.image_files(group), output_root, used_names
             )
             copied += group_copied
-
             print(f"[{source_root.name}] {group.name}: 复制 {group_copied} 张")
-
         if not groups:
             print(f"[{source_root.name}] 未找到来源子目录。")
 
-        manifest_outputs: list[str] = []
         for source in manifest_sources:
             images = self.image_files(source.path)
             relative_path = source.path.relative_to(self.root.resolve()).as_posix()
@@ -150,20 +143,17 @@ class DatasetCombiner:
                 )[: source.count],
                 key=self.path_sort_key,
             )
-            group_copied, names = self.copy_group(
+            group_copied = self.copy_group(
                 source.path, selected, output_root, used_names
             )
             copied += group_copied
-            manifest_outputs.extend(names)
             print(
                 f"[manifest] {relative_path}: 选取 {source.count} 张，复制 {group_copied} 张"
             )
 
         normalized = self.normalize_output(output_root)
-        if source_root.name == "非橙子数据源":
-            self.save_manifest_index(manifest_outputs)
-        print(f"[整理] {output_root.name}：输出图片已统一为正方形，修正 {normalized} 张已有图片。")
-        return copied, True
+        print(f"[整理] {output_root.name}：输出图片已统一为正方形，修正 {normalized} 张图片。")
+        return copied
 
     def load_manifest(self, manifest_path: Path) -> tuple[ManifestSource, ...]:
         if manifest_path.is_symlink():
@@ -216,51 +206,14 @@ class DatasetCombiner:
             sources.append(ManifestSource(source_path, count))
         return tuple(sources)
 
-    def load_manifest_index(self) -> tuple[str, ...]:
-        index_path = self.root / MANIFEST_INDEX_FILENAME
-        if index_path.is_symlink():
-            raise ValueError(f"输出索引不能是符号链接：{index_path}")
-        if not index_path.exists():
-            return ()
-        if not index_path.is_file():
-            raise ValueError(f"输出索引必须是普通文件：{index_path}")
-        try:
-            names = json.loads(index_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            raise ValueError(f"{index_path}: {error}") from error
-        if not isinstance(names, list) or any(
-            not isinstance(name, str)
-            or Path(name).name != name
-            or Path(name).suffix.casefold() not in IMAGE_SUFFIXES
-            for name in names
-        ):
-            raise ValueError(f"输出索引包含无效文件名：{index_path}")
-        return tuple(names)
-
-    def save_manifest_index(self, names: list[str]) -> None:
-        index_path = self.root / MANIFEST_INDEX_FILENAME
-        temporary_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=self.root,
-                suffix=".json", delete=False
-            ) as temporary:
-                temporary_path = Path(temporary.name)
-                json.dump(names, temporary, ensure_ascii=False, indent=2)
-                temporary.write("\n")
-            os.replace(temporary_path, index_path)
-        finally:
-            if temporary_path is not None and temporary_path.exists():
-                temporary_path.unlink()
-
     def copy_group(
         self,
         group: Path,
         images: list[Path],
         output_root: Path,
         used_names: set[str],
-    ) -> tuple[int, list[str]]:
-        names: list[str] = []
+    ) -> int:
+        copied = 0
         prefix = f"{group.name}_"
         for source_file in images:
             target_name = (
@@ -272,8 +225,8 @@ class DatasetCombiner:
             if not self.copy_image(source_file, output_root / target_name):
                 continue
             used_names.add(target_name.casefold())
-            names.append(target_name)
-        return len(names), names
+            copied += 1
+        return copied
 
     @staticmethod
     def path_sort_key(path: Path) -> tuple[str, str]:
