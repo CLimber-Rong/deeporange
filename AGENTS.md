@@ -79,7 +79,9 @@
 
 ### 本地模型训练
 
-`本地训练/main.py` 是 Tk 图形界面入口，Windows 使用 `本地训练/train.bat` 启动。训练器默认从项目根目录读取已生成的 `橙子/`、`非橙子/`。`本地训练/trainer_config.json` 用 `trainer` 选择 `original`（默认，约 15% 验证集）、`original_full_data`（继承原版参数但不划验证集）或 `optimized`。模型导出到 `本地训练/model/models_keras/`，打包文件生成在 `本地训练/`；独立的 `验证集/` 和 `测试集/` 不参与训练。用户操作细节见 `本地训练/README.md`。
+`本地训练/main.py` 是 Tk 图形界面入口，Windows 使用 `本地训练/train.bat` 启动；`predictor.bat` 也调用同一入口。GUI 优先从项目根目录读取已生成的 `橙子/`、`非橙子/`。`本地训练/trainer_config.json` 是必需文件，用 `trainer` 选择 `original`（约 15% 内部验证集）、`original_full_data`（仅继承原版并关闭验证集划分）或 `optimized`；文件缺失或值错误时不会自动改选训练器。`main.py` 按该值加载 `base/trainer_original.py`、`base/trainer_original_full_data.py` 或 `base/trainer_optimized.py`。界面默认「标准训练」对应原版 20 轮、批大小 16、学习率 0.001、100 隐藏单元；用户选「精细训练」或「自定义」会覆盖相应参数，不能因训练器名称就认定实际使用了原版默认参数。
+
+训练器用 `本地训练/model/basemodels/` 的冻结 MobileNetV2 α=0.5 图提取 224×224 图片特征，再训练二分类头；模型默认导出到 `本地训练/model/models_keras/`，ZIP 生成在 `本地训练/`。`本地训练/resources/runtime/` 是附带的 Windows Python 与依赖，`resources/datasets/` 是备用数据目录，`resources/testsets/` 是识别页示例图。独立的 `验证集/`、`测试集/` 不参与训练；分类测试按有效子目录名排序确定类别及模型输出列，需与导出模型 `metadata.json` 的标签顺序对应。测试页的「一键导出」按用户所选位置生成报告；分类模式会额外生成含文件名的 `逐样本预测.csv` 和同目录的 `导出预测错误图片.bat`，运行批处理后按真实类别复制错判图片。用户操作细节见 `本地训练/README.md`；历史误判分析见根目录 `观察报告.md`。
 
 ### 非橙子数据 manifest.json 规范
 
@@ -112,7 +114,7 @@
 ├── obfuscate_exclusions.txt
 ├── .obfuscate_cache/			// 自动生成的抠图遮罩缓存，可删除
 ├── 生成数据集.bat
-├── 本地训练/					// Tk 图形界面训练与测试，入口、配置及模型输出独立于数据生成脚本
+├── 本地训练/						// Tk 图形界面训练与测试，入口、配置及模型输出独立于数据生成脚本
 ├── 爬虫/						// 临时收集工具与素材，未审查并转入正式来源的图片不参与生成
 ├── 测试集/						// 人工测试素材，不参与训练集生成
 ├── 验证集/						// 独立验证素材，不参与训练集生成
