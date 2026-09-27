@@ -4680,6 +4680,26 @@ class MobileNetTesterApp:
                     row += ["%.6f" % float(p) for p in res["y_prob"][i]]
                     row += [classes[int(y_pred[i])], os.path.basename(res["paths"][i])]
                     w.writerow(row)
+
+            orange = next((i for i, name in enumerate(classes)
+                           if "橙子" in name and "非橙子" not in name), None)
+            non_orange = next((i for i, name in enumerate(classes)
+                               if "非橙子" in name), None)
+            with open(os.path.join(d2, "导出预测错误图片.bat"),
+                      "w", encoding="utf-8", newline="\r\n") as bat:
+                bat.write("@echo off\nchcp 65001 >nul\nsetlocal DisableDelayedExpansion\n")
+                for folder in ("预测错误的橙子", "预测错误的非橙子"):
+                    bat.write(f'if not exist "%~dp0{folder}" mkdir "%~dp0{folder}"\n')
+                for i in range(len(y_true)):
+                    truth, prediction = int(y_true[i]), int(y_pred[i])
+                    if truth == orange and prediction == non_orange:
+                        folder = "预测错误的橙子"
+                    elif truth == non_orange and prediction == orange:
+                        folder = "预测错误的非橙子"
+                    else:
+                        continue
+                    source = os.path.abspath(res["paths"][i]).replace("%", "%%")
+                    bat.write(f'copy /Y "{source}" "%~dp0{folder}" >nul\n')
         except Exception:
             pass
 
