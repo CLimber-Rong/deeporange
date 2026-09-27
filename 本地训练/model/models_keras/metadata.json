@@ -1,0 +1,29 @@
+{
+  "format": "tm-object-classifier",
+  "formatVersion": 1,
+  "name": "橙子识别项目",
+  "createdAt": "2026-09-26T05:12:28.033Z",
+  "imageSize": 224,
+  "labels": [
+    {
+      "id": "model-label-1",
+      "name": "橙子",
+      "color": "#3157D5"
+    },
+    {
+      "id": "model-label-2",
+      "name": "非橙子",
+      "color": "#F47A5A"
+    }
+  ],
+  "training": {
+    "epochs": 5,
+    "batchSize": 4,
+    "learningRate": 0.001
+  },
+  "prediction": {
+    "confidenceThreshold": 0.6,
+    "marginThreshold": 0.12
+  },
+  "featureExtractor": "MobileNet v2 alpha 0.5 embedding"
+}

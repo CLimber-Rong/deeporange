@@ -5,6 +5,9 @@
 待混淆数据
 非橙子
 验证集
+本地训练/resources
+本地训练/__pycache__
+本地训练/result
 /爬虫/*
 !/爬虫/main.py
 /数据源/*

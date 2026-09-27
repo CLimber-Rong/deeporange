@@ -1,0 +1,7 @@
+# Windows 10, Python 3.10 (与 resources/runtime 中的已验证版本一致)
+# TensorFlow 2.10 是最后支持原生 Windows CUDA 的版本；不使用 GPU 也可运行。
+Pillow==12.3.0
+numpy==1.26.4
+tensorflow==2.10.0
+matplotlib==3.10.9
+scikit-learn==1.7.2
