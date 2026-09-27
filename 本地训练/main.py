@@ -4672,13 +4672,13 @@ class MobileNetTesterApp:
                       "w", encoding="utf-8-sig", newline="") as f:
                 w = _csv.writer(f)
                 header = ["样本序号", "真实标签"] + \
-                         ["P(%s)" % c for c in classes] + ["预测标签"]
+                         ["P(%s)" % c for c in classes] + ["预测标签", "文件名"]
                 w.writerow(header)
                 y_pred = m["y_pred"]
                 for i in range(len(y_true)):
                     row = [i, classes[int(y_true[i])]]
                     row += ["%.6f" % float(p) for p in res["y_prob"][i]]
-                    row += [classes[int(y_pred[i])]]
+                    row += [classes[int(y_pred[i])], os.path.basename(res["paths"][i])]
                     w.writerow(row)
         except Exception:
             pass
@@ -4923,7 +4923,7 @@ class MobileNetTesterApp:
         report = self._build_cls_report(model_path, data_dir, classes, y_true, m)
 
         return {"type": "classification", "classes": classes,
-                "y_true": y_true, "y_prob": y_prob,
+                "paths": paths, "y_true": y_true, "y_prob": y_prob,
                 "metrics": m, "report": report,
                 "n_samples": len(y_true),
                 "model_path": model_path, "data_dir": data_dir}
