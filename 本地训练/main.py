@@ -40,6 +40,9 @@ TRAINER_MODULES = {
     "original": "base.trainer_original",
     "original_full_data": "base.trainer_original_full_data",
     "optimized": "base.trainer_optimized",
+    "optimized_full_data": "base.trainer_optimized_full_data",
+    "optimized_2": "base.trainer_optimized_2",
+    "optimized_2_full_data": "base.trainer_optimized_2_full_data",
 }
 with open(os.path.join(PROJECT_ROOT, "trainer_config.json"), encoding="utf-8") as config_file:
     TRAINER_NAME = json.load(config_file)["trainer"]
@@ -51,8 +54,12 @@ TRAIN_VALIDATION_DESCRIPTION = {
     "original": "按类别抽取约 15% 作为验证集，剩余约 85% 用于训练",
     "original_full_data": "不划验证集，全部样本用于训练",
     "optimized": "按类别抽取约 15% 作为验证集，并据验证损失早停",
+    "optimized_full_data": "不划验证集，全部样本用于训练",
+    "optimized_2": "按类别抽取约 20% 作为验证集，并据验证损失早停和调整学习率",
+    "optimized_2_full_data": "不划验证集，全部样本用于训练",
 }[TRAINER_NAME]
-TRAINER_API = TRAINER_MODULE if hasattr(TRAINER_MODULE, "CLASS_NAMES") else import_module("base.trainer_original")
+TRAINER_API = getattr(TRAINER_MODULE, "TRAINER_API", None) or (
+    TRAINER_MODULE if hasattr(TRAINER_MODULE, "CLASS_NAMES") else import_module("base.trainer_original"))
 OrangeClassifier = TRAINER_MODULE.OrangeClassifier
 TRAIN_CLASS_NAMES = TRAINER_API.CLASS_NAMES
 TRAIN_IMAGE_SIZE = TRAINER_API.IMAGE_SIZE
@@ -184,6 +191,26 @@ def _load_model_metadata_thresholds(model_dir):
                 labels)
     except Exception:
         return None, None, None
+
+
+def _load_model_image_preprocessing(model_path):
+    """读取训练时的图像布局；旧模型默认使用中心裁剪。"""
+    try:
+        if os.path.isdir(model_path):
+            with open(os.path.join(model_path, "metadata.json"), encoding="utf-8") as f:
+                meta = json.load(f)
+        else:
+            with zipfile.ZipFile(model_path) as archive:
+                model_files = [name for name in archive.namelist()
+                               if name.rsplit("/", 1)[-1] == "model.json"]
+                model_dir = (model_files[0].rsplit("/", 1)[0]
+                             if model_files and "/" in model_files[0] else "")
+                metadata_name = f"{model_dir}/metadata.json" if model_dir else "metadata.json"
+                with archive.open(metadata_name) as f:
+                    meta = json.load(f)
+        return "letterbox" if meta.get("imagePreprocessing") == "letterbox" else "center_crop"
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile):
+        return "center_crop"
 
 # 用本机实际存在的字体族，避免 Tk 回退到不支持中文的字体。
 _UI_FONT = _MONO_FONT = _EMOJI_FONT = ""
@@ -1257,10 +1284,11 @@ def _looks_like_graph_model(model):
 
 
 
-def load_image_array(path, size):
-    """读取图片为供模型使用的 float32 数组（实现见下方 _center_crop_on_white 之后）。"""
+def load_image_array(path, size, image_preprocessing="center_crop"):
+    """按模型所需的图像布局读取 float32 数组。"""
     from PIL import Image
-    img = _center_crop_on_white(Image.open(path), size=size[0])
+    layout = _letterbox_on_white if image_preprocessing == "letterbox" else _center_crop_on_white
+    img = layout(Image.open(path), size=size[0])
     return np.asarray(img, dtype=np.float32)
 
 
@@ -1310,7 +1338,8 @@ def to_probabilities(raw):
 
 
 
-def predict_paths(model, paths, size, use_preproc, batch_size=32, on_progress=None):
+def predict_paths(model, paths, size, use_preproc, batch_size=32, on_progress=None,
+                  image_preprocessing="center_crop"):
     """批量预测。
 
     use_preproc 控制是否套 Keras 的 mobilenet_v2.preprocess_input（0~255 -> [-1,1]）。
@@ -1329,7 +1358,7 @@ def predict_paths(model, paths, size, use_preproc, batch_size=32, on_progress=No
     n = len(paths)
     for i in range(0, n, batch_size):
         batch = paths[i:i + batch_size]
-        arr = np.stack([load_image_array(p, size) for p in batch])
+        arr = np.stack([load_image_array(p, size, image_preprocessing) for p in batch])
         if preprocess is not None:
             arr = preprocess(arr)
         outs.append(np.asarray(model.predict(arr, verbose=0), dtype=np.float64))
@@ -1361,13 +1390,26 @@ def _center_crop_on_white(img, size=PRED_IMAGE_SIZE):
     return canvas
 
 
-def prepare_image_for_mobilenet(path):
-    """准备图片用于 MobileNet 输入: uint8 (224, 224, 3)。
+def _letterbox_on_white(img, size=PRED_IMAGE_SIZE):
+    """整图等比缩放并居中贴到白底，与 optimized_2 训练输入一致。"""
+    from PIL import Image, ImageOps
 
-    原 base/predictor.py 中的 prepare_image_for_mobilenet，原样整合。
+    img = ImageOps.exif_transpose(img).convert("RGBA")
+    width, height = img.size
+    scale = size / max(width, height)
+    new_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    resized = img.resize(new_size, Image.BILINEAR)
+    canvas = Image.new("RGB", (size, size), (255, 255, 255))
+    canvas.paste(resized, ((size - new_size[0]) // 2, (size - new_size[1]) // 2), resized)
+    return canvas
+
+
+def prepare_image_for_mobilenet(path, image_preprocessing="center_crop"):
+    """准备图片用于 MobileNet 输入: uint8 (224, 224, 3)。
     """
     from PIL import Image
-    img = _center_crop_on_white(Image.open(path))
+    layout = _letterbox_on_white if image_preprocessing == "letterbox" else _center_crop_on_white
+    img = layout(Image.open(path))
     return np.asarray(img, dtype=np.uint8)
 
 
@@ -1422,6 +1464,7 @@ class PretrainedOrangePredictor:
         self.margin_threshold = (marg if marg is not None
                                  else PRED_MARGIN_THRESHOLD)
         self.class_names = labels if labels else list(PRED_CLASS_NAMES)
+        self.image_preprocessing = _load_model_image_preprocessing(model_dir)
         print("[系统] 判定阈值：置信度 %.2f / 差距 %.2f，类别 %s%s"
               % (self.conf_threshold, self.margin_threshold,
                  self.class_names,
@@ -1555,7 +1598,7 @@ class PretrainedOrangePredictor:
         def _decode(p):
             """解码单张；失败返回异常对象而不抛，避免拖垮整批。"""
             try:
-                return prepare_image_for_mobilenet(p)
+                return prepare_image_for_mobilenet(p, self.image_preprocessing)
             except Exception as e:
                 return e
 
@@ -1600,7 +1643,7 @@ class PretrainedOrangePredictor:
         if not os.path.exists(image_path):
             raise FileNotFoundError("图片不存在: %s" % image_path)
 
-        img_uint8 = prepare_image_for_mobilenet(image_path)
+        img_uint8 = prepare_image_for_mobilenet(image_path, self.image_preprocessing)
         probs = self._probs_from_images(np.asarray(img_uint8)[None])[0]
         return self._decide(probs)
 
@@ -2499,9 +2542,6 @@ TRAIN_EXPORT_FILES = (
     ("metadata.json", "模型元数据（标签 / 阈值 / 训练参数）"),
     ("model.json", "TFJS Layers Model 拓扑"),
     ("weights.bin", "TFJS 分类头权重（float32 拼接）"),
-    ("training_curve.png", "训练曲线（loss / accuracy）"),
-    ("weights.npz", "可选：numpy 权重备份"),
-    ("head.keras", "可选：Keras 分类头备份"),
 )
 
 
@@ -2558,7 +2598,8 @@ def build_train_source_report(source, source_type, class_counts, class_issues):
 
 
 def build_train_report(source, source_type, result, params, export_dir,
-                       class_counts, class_issues, env_lines, status_line):
+                       class_counts, class_issues, env_lines, status_line,
+                       artifacts=None):
     """训练摘要报告全文（导出到「训练A 训练摘要」标签页 / txt）。"""
     def _kv(k, v, width=14):
         return "%-*s: %s" % (width, k, v)
@@ -2669,13 +2710,17 @@ def build_train_report(source, source_type, result, params, export_dir,
             if os.path.isfile(p):
                 L.append("    ✔ %-18s %9.1f KB   %s"
                          % (name, os.path.getsize(p) / 1024.0, desc))
-        zips = sorted(f for f in os.listdir(export_dir) if f.lower().endswith(".zip"))
-        for z in zips:
-            p = os.path.join(export_dir, z)
-            L.append("    ✔ %-18s %9.1f KB   打包的识别模型（可直接用于测试页）"
-                     % (z, os.path.getsize(p) / 1024.0))
-        if not zips:
+        archive = (artifacts or {}).get("zip")
+        if archive and os.path.isfile(archive):
+            L.append("    ✔ %s（%.1f KB）打包的识别模型（可直接用于测试页）"
+                     % (archive, os.path.getsize(archive) / 1024.0))
+        else:
             L.append("    ⚠️ 未生成 .zip 打包模型")
+        for key, desc in (("training_curve", "训练曲线"),
+                          ("validation_report", "验证集评测图")):
+            image_path = (artifacts or {}).get(key)
+            if image_path and os.path.isfile(image_path):
+                L.append("    ✔ %s（%s）" % (image_path, desc))
         L.append("")
         L.append("  说明：导出目录本身即可作为「测试」页的模型路径"
                  "（内含 model.json / weights.bin / metadata.json）。")
@@ -2769,7 +2814,7 @@ def build_train_curve_text(history, params):
     L.append("解读：")
     if val_loss:
         L.append("  · 训练 loss 下降而验证 loss 上升，可能表示分类头开始过拟合。")
-        if TRAINER_NAME == "optimized":
+        if TRAINER_NAME in ("optimized", "optimized_2"):
             L.append("  · 当前训练器按验证 loss 早停，并恢复最佳一轮的权重。")
         L.append("  · 验证曲线抖动大通常说明验证样本偏少。")
     else:
@@ -3213,6 +3258,7 @@ class TrainEngine:
 
         export_dir = self._resolve_export_dir()
         exported_path = None
+        artifacts = {}
         if not cancelled:
             log("")
             log("[阶段] 导出模型 → %s" % export_dir)
@@ -3222,7 +3268,7 @@ class TrainEngine:
             # 这里统一在项目根目录下打包，保证产物落在项目里而不是启动目录。
             os.chdir(PROJECT_ROOT)
             try:
-                clf.save(export_dir, zip_output=True)
+                artifacts = clf.save(export_dir, zip_output=True)
             finally:
                 os.chdir(cwd)
             log("已保存到 %s/" % export_dir)
@@ -3233,7 +3279,8 @@ class TrainEngine:
                     class_counts=st["class_counts"],
                     class_issues=st["class_issues"],
                     health_issues=st["health_issues"],
-                    export_dir=export_dir, exported_path=exported_path,
+                     export_dir=export_dir, exported_path=exported_path,
+                     artifacts=artifacts,
                     cancelled=cancelled,
                     duration=duration, env_lines=_env_lines())
 
@@ -3626,7 +3673,7 @@ class MobileNetTesterApp:
                   "    4. 训练在后台线程执行：先提取冻结 MobileNetV2 特征，再训练分类头；\n"
                   "       %s。\n"
                   "    5. 训练完成后模型导出到导出目录：metadata.json / model.json /\n"
-                  "       weights.bin / training_curve.png / .zip 打包模型。\n"
+                  "       weights.bin；曲线 PNG 单独保存到本地训练目录。\n"
                   "    6. 勾选「自动填充」时，导出目录会直接写进「测试」页的模型路径，\n"
                   "       点「➡ 去测试页识别」即可用刚训练出的模型跑分类/识别。\n\n"
                   "  ⚠️  训练与测试互斥：训练进行中不能启动测试，反之亦然。\n\n"
@@ -4246,18 +4293,15 @@ class MobileNetTesterApp:
         report = build_train_report(
             res["source"], res["source_type"], res["result"], res["params"],
             res.get("export_dir"), res["class_counts"], res["class_issues"],
-            res["env_lines"], status_line="训练完成 ✔")
+            res["env_lines"], status_line="训练完成 ✔",
+            artifacts=res.get("artifacts"))
         entries.append(("训练A 训练摘要", report))
 
-        # 训练曲线：优先展示当前训练器导出的 PNG，保证与导出物一致
+        # 训练曲线：只展示本次训练生成的 PNG，避免读取旧模型目录里的图片。
         history = (res["result"] or {}).get("history") or {}
         curve_text = build_train_curve_text(history, res["params"])
-        curve_png = None
-        if res.get("export_dir"):
-            p = os.path.join(res["export_dir"], "training_curve.png")
-            if os.path.isfile(p):
-                curve_png = p
-        if curve_png:
+        curve_png = (res.get("artifacts") or {}).get("training_curve")
+        if curve_png and os.path.isfile(curve_png):
             try:
                 from PIL import Image
                 img = Image.open(curve_png)
@@ -4906,7 +4950,9 @@ class MobileNetTesterApp:
             self._set_progress(5 + 85.0 * done / max(total, 1))
             self._set_status("预测中… %d / %d" % (done, total))
 
-        raw = np.asarray(predict_paths(model, paths, size, use_preproc, 32, cb),
+        image_preprocessing = _load_model_image_preprocessing(model_path)
+        raw = np.asarray(predict_paths(model, paths, size, use_preproc, 32, cb,
+                                       image_preprocessing),
                          dtype=np.float64)
         if raw.ndim == 1:
             raw = raw.reshape(-1, 1)

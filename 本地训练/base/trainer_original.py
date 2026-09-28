@@ -7,7 +7,6 @@ import json
 import math
 import os
 import re
-import shutil
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +17,8 @@ from typing import Callable, List, Optional, Dict, Any
 
 import numpy as np
 from PIL import Image, ImageOps
+
+from .model_export import ModelExport
 
 # 配置常量
 CLASS_NAMES = ["橙子", "非橙子"]
@@ -967,12 +968,15 @@ class OrangeClassifier:
         # 生成 model.json（TFJS Layers Model 格式）+ weights.bin
         _save_tfjs_layers_model(model, w1, b1, w2, b2, out)
 
-        # 生成训练曲线图（loss / accuracy 随 epoch 变化），随模型一起导出
+        export = ModelExport(out)
+        artifacts = {}
+        # 训练曲线单独放在本地训练目录，模型包只包含官网所需文件。
         try:
             history = self.training_result.get("history") or {}
             if history.get("loss"):
-                plot_training_curves(history, str(out / "training_curve.png"))
-                print(f"训练曲线已保存: {out / 'training_curve.png'}")
+                curve = export.save_plot("training_curve", lambda path: plot_training_curves(history, path))
+                artifacts["training_curve"] = str(curve)
+                print(f"训练曲线已保存: {curve}")
         except Exception as e:
             print(f"[警告] 训练曲线图生成失败：{e}")
 
@@ -988,7 +992,10 @@ class OrangeClassifier:
             os.remove(f"{out}/weights.npz")
         except: pass
         if zip_output:
-            zip_path = shutil.make_archive("橙子识别项目.识物模型", "zip", out)
+            zip_path = export.package()
+            artifacts["zip"] = str(zip_path)
             size_mb = os.path.getsize(zip_path) / 1024 / 1024
             print(f"已打包: {zip_path} ({size_mb:.1f} MB)")
+
+        return artifacts
 

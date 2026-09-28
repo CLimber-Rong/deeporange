@@ -20,6 +20,8 @@ from typing import Callable, List, Optional, Dict, Any
 import numpy as np
 from PIL import Image, ImageOps
 
+from .model_export import ModelExport
+
 # 配置常量
 CLASS_NAMES = ["橙子", "非橙子"]
 IMAGE_SIZE = 224
@@ -724,6 +726,8 @@ def plot_validation_report(validation: dict, labels: list, out_path: str) -> Non
 
 # 主分类器类
 class OrangeClassifier:
+    validation_fraction = VALIDATION_FRACTION
+
     def __init__(self, model_json_path: Optional[str] = None):
         self.extractor = make_extractor(model_json_path)
         self.model = None
@@ -756,14 +760,14 @@ class OrangeClassifier:
         def build_model(dim, num_labels):
             model = build_head(dim, num_labels, hidden_units, t["learningRate"],
                                dropout_rate=dropout_rate, l2_reg=l2_reg)
-            required_shape = (EMBEDDING_SIZE, HIDDEN_UNITS)
+            required_shape = (EMBEDDING_SIZE, hidden_units)
             actual_shape = tuple(model.layers[0].kernel.shape)
             if actual_shape != required_shape:
                 raise RuntimeError(
                     f"第一层（dense_Dense1）权重形状为 {actual_shape}，"
                     f"但要求必须是 {required_shape}"
                     f"（嵌入维度实际为 {dim}，需为 {EMBEDDING_SIZE}；"
-                    f"隐藏单元数实际为 {hidden_units}，需为 {HIDDEN_UNITS}）。"
+                    f"隐藏单元数实际为 {actual_shape[1]}，需为 {hidden_units}）。"
                 )
             log(f"[校验] 第一层权重形状 {actual_shape} 符合要求 {required_shape}")
             return model
@@ -870,7 +874,7 @@ class OrangeClassifier:
         if val_examples is not None:
             validation_split = 0.0
         else:
-            frac = validation_split_override if validation_split_override is not None else VALIDATION_FRACTION
+            frac = validation_split_override if validation_split_override is not None else self.validation_fraction
             validation_split = frac if len(examples) >= VALIDATION_MIN_TOTAL else 0.0
 
         t_extract_start = time.perf_counter()
@@ -1154,7 +1158,8 @@ class OrangeClassifier:
                 "confidenceThreshold": CONFIDENCE_THRESHOLD,
                 "marginThreshold": MARGIN_THRESHOLD
             },
-            "featureExtractor": "MobileNet v2 alpha 0.5 embedding"
+            "featureExtractor": "MobileNet v2 alpha 0.5 embedding",
+            "imagePreprocessing": "letterbox"
         }
         (out / "metadata.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1162,20 +1167,25 @@ class OrangeClassifier:
 
         _save_tfjs_layers_model(model, w1, b1, w2, b2, out)
 
+        export = ModelExport(out)
+        artifacts = {}
         try:
             history = self.training_result.get("history") or {}
             if history.get("loss"):
-                plot_training_curves(history, str(out / "training_curve.png"))
-                print(f"📈 训练曲线已保存: {out / 'training_curve.png'}")
+                curve = export.save_plot("training_curve", lambda path: plot_training_curves(history, path))
+                artifacts["training_curve"] = str(curve)
+                print(f"📈 训练曲线已保存: {curve}")
         except Exception as e:
             print(f"[警告] 训练曲线图生成失败：{e}")
 
         try:
             validation = self.training_result.get("validation")
             if validation:
-                plot_validation_report(validation, self.training_result["labels"],
-                                       str(out / "validation_report.png"))
-                print(f"📊 验证集评测图已保存: {out / 'validation_report.png'}")
+                report = export.save_plot(
+                    "validation_report",
+                    lambda path: plot_validation_report(validation, self.training_result["labels"], path))
+                artifacts["validation_report"] = str(report)
+                print(f"📊 验证集评测图已保存: {report}")
         except Exception as e:
             print(f"[警告] 验证集评测图生成失败：{e}")
 
@@ -1191,6 +1201,9 @@ class OrangeClassifier:
             os.remove(f"{out}/weights.npz")
         except: pass
         if zip_output:
-            zip_path = shutil.make_archive("橙子识别项目.识物模型", "zip", out)
+            zip_path = export.package()
+            artifacts["zip"] = str(zip_path)
             size_mb = os.path.getsize(zip_path) / 1024 / 1024
             print(f"📦 已打包: {zip_path} ({size_mb:.1f} MB)")
+
+        return artifacts
