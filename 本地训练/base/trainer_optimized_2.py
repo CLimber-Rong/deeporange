@@ -115,7 +115,8 @@ def load_project_folder(root: str) -> Project:
         d = Path(root) / name
         if not d.is_dir():
             raise FileNotFoundError(f"找不到类别目录: {d}")
-        files = sorted(p for p in d.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"})
+        files = sorted(p for p in d.iterdir() if p.suffix.lower() in
+                       {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"})
         samples = [Sample(id=f"sample-{idx}-{i:04d}", data=prepare_upload_jpeg(p)) for i, p in enumerate(files)]
         classes.append(ClassData(id=f"class-{'ab'[idx]}", name=name, samples=samples))
     return Project(classes)

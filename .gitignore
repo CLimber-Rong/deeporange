@@ -17,5 +17,9 @@
 总资源
 __pycache__/
 .obfuscate_cache/
+/本地训练/.batch_cache/
+/本地训练/.batch_*.log
+/本地训练/training_curve_*.png
+/本地训练/validation_report_*.png
 *.py[cod]
 *$py.class
